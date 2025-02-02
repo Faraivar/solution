@@ -1,0 +1,88 @@
+package ca.yorku.cmg.lob.exchange;
+
+import ca.yorku.cmg.lob.orderbook.Ask;
+import ca.yorku.cmg.lob.orderbook.Bid;
+import ca.yorku.cmg.lob.orderbook.Orderbook;
+import ca.yorku.cmg.lob.tradestandards.IOrder;
+import ca.yorku.cmg.lob.tradestandards.ITrade;
+import ca.yorku.cmg.lob.tradestandards.OrderOutcome;
+
+import java.util.ArrayList;
+
+public class Exchange {
+    Orderbook book;
+    SecurityList securities = new SecurityList();
+    AccountsList accounts = new AccountsList();
+    ArrayList<ITrade> tradesLog = new ArrayList<>();
+    long totalFees = 0;
+
+    public Exchange() {
+        book = new Orderbook();
+    }
+
+    public boolean validateOrder(IOrder o) {
+        if (securities.get(o.getSecurityTicker()) == null) {
+            System.err.println("Order validation: ticker " + o.getSecurityTicker() + " not supported.");
+            return false;
+        }
+
+        if (accounts.get(o.getTraderID()) == null) {
+            System.err.println("Order validation: trader with ID " + o.getTraderID() + " not registered with the exchange.");
+            return false;
+        }
+
+        int pos = accounts.get(o.getTraderID()).getPosition(o.getSecurityTicker());
+        long bal = accounts.get(o.getTraderID()).getBalance();
+
+        if ((o instanceof Ask) && (pos < o.getQuantity())) {
+            System.err.println("Order validation: seller with ID " + o.getTraderID() + " not enough shares of " + o.getSecurityTicker() + ": has " + pos + " and tries to sell " + o.getQuantity());
+            return false;
+        }
+
+        if ((o instanceof Bid) && (bal < o.getValue())) {
+            System.err.println(String.format("Order validation: buyer with ID %d does not have enough balance: has $%,.2f and tries to buy for $%,.2f", o.getTraderID(), bal / 100.0, o.getValue() / 100.0));
+            return false;
+        }
+        return true;
+    }
+
+    public void submitOrder(IOrder o, long time) {
+        if (!validateOrder(o)) {
+            return;
+        }
+
+        OrderOutcome oOutcome;
+
+        if (o instanceof Bid) {
+            oOutcome = book.getAsks().processOrder(o, time);
+            if (oOutcome.getUnfulfilledOrder().getQuantity() > 0) {
+                book.getBids().add(oOutcome.getUnfulfilledOrder());
+            }
+        } else {
+            oOutcome = book.getBids().processOrder(o, time);
+            if (oOutcome.getUnfulfilledOrder().getQuantity() > 0) {
+                book.getAsks().add(oOutcome.getUnfulfilledOrder());
+            }
+        }
+
+        if (oOutcome.getResultingTrades() != null) {
+            tradesLog.addAll(oOutcome.getResultingTrades());
+        } else {
+            return;
+        }
+
+        for (ITrade t : oOutcome.getResultingTrades()) {
+            t.getBuyerFee();
+            accounts.get(t.getBuyerID()).applyFee(t.getBuyerFee());
+            accounts.get(t.getBuyerID()).deductBalance(t.getPayment());
+            accounts.get(t.getBuyerID()).addPosition(t.getSecurityTicker(), t.getQuantity());
+
+            t.getSellerFee();
+            accounts.get(t.getSellerID()).applyFee(t.getSellerFee());
+            accounts.get(t.getSellerID()).addBalance(t.getPayment());
+            accounts.get(t.getSellerID()).deductPosition(t.getSecurityTicker(), t.getQuantity());
+
+            this.totalFees += t.getBuyerFee() + t.getSellerFee();
+        }
+    }
+}
